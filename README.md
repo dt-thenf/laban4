@@ -1,92 +1,93 @@
 # laban4
 
-Self-calibrating, tilt-compensated wearable compass for **ESP32 + GY-85**.
+La bàn đeo người có **bù nghiêng**, **tự hiệu chuẩn trực tiếp trên ESP32** sử dụng **GY-85**.
 
-GY-85 sensor set used by this firmware:
+Bộ cảm biến GY-85 dùng trong firmware:
 
-- ADXL345 accelerometer — I2C 0x53
-- ITG-3205 / ITG-3200 gyroscope — I2C 0x68
-- HMC5883L magnetometer — I2C 0x1E
+- ADXL345 — gia tốc kế 3 trục, I2C `0x53`
+- ITG-3205 / ITG-3200 — con quay hồi chuyển 3 trục, I2C `0x68`
+- HMC5883L — từ kế 3 trục, I2C `0x1E`
 
-The repository is built from scratch and does not depend on earlier compass repositories or PC-side calibration scripts.
+Repo này được xây dựng mới từ đầu, không phụ thuộc các repo la bàn cũ và không cần chương trình hiệu chuẩn trên máy tính.
 
-## Body coordinate system
+## Hệ trục của người đeo
 
-The whole project uses one explicit body frame:
+Toàn bộ dự án dùng một hệ trục thống nhất:
 
 ~~~text
-                     +X
-              toward the head
-                      ^
-                      |
-        +Y <----------+
-     wearer's left    |
-                      |
-              +Z goes INTO the body
+                       +X
+                  hướng lên đầu
+                        ^
+                        |
+          +Y <----------+
+       sang tay trái    |
+                        |
+              +Z hướng vào trong cơ thể
 
-        -Z = FORWARD / travel direction
+          -Z = HƯỚNG TIẾN / HƯỚNG DI CHUYỂN
 ~~~
 
-For heading, the direction vector is therefore fixed in code as:
+Vector hướng cần lấy góc la bàn được cố định trong code:
 
 ~~~text
 forward_body = [0, 0, -1]
 ~~~
 
-The heading is the azimuth of **-Z**, not the azimuth of an arbitrary HMC5883L X/Y pair.
+Vì vậy heading được tính theo **-Z**, không phải mặc định theo cặp trục X/Y của HMC5883L.
 
-## Why this remains correct when tilted
+## Vì sao vẫn xác định đúng hướng khi module bị nghiêng
 
-A level-only compass often uses atan2(My, Mx). That fails when the module tilts because the magnetometer's vertical field component leaks into the two axes used for heading.
+Cách tính đơn giản kiểu `atan2(My, Mx)` chỉ phù hợp khi module gần nằm ngang. Khi module nghiêng, thành phần từ trường theo phương thẳng đứng sẽ làm sai góc.
 
-laban4 instead uses a vector formulation:
+`laban4` sử dụng cách tính theo vector:
 
-1. Estimate the local **up/gravity vector** from ADXL345, stabilized by ITG-3205 gyro propagation.
-2. Correct HMC5883L data for hard-iron and soft-iron distortion.
-3. Project the corrected magnetic vector onto the plane perpendicular to gravity to obtain horizontal magnetic north.
-4. Project body forward vector **-Z** onto the same horizontal plane.
-5. Compute the signed angle from north to projected forward.
-6. Apply circular filtering so the 359° -> 0° boundary does not create a jump.
-7. Add configurable magnetic declination if true-north heading is required.
+1. Ước lượng vector **hướng lên / trọng lực** bằng ADXL345 và ổn định bằng gyro ITG-3205.
+2. Hiệu chỉnh HMC5883L để giảm sai số hard-iron và soft-iron.
+3. Chiếu vector từ trường đã hiệu chỉnh lên mặt phẳng vuông góc với trọng lực để tìm hướng Bắc từ.
+4. Chiếu vector hướng tiến **-Z** lên cùng mặt phẳng ngang.
+5. Tính góc có dấu giữa hướng Bắc và hướng tiến.
+6. Lọc góc theo đường tròn để không bị nhảy khi chuyển từ 359° sang 0°.
+7. Cộng độ từ thiên nếu cần quy đổi sang Bắc thật.
 
-This avoids Euler-angle singularities in the core compass calculation.
+Cách này không phụ thuộc trực tiếp vào roll/pitch/yaw Euler trong phép tính heading chính.
 
-There is one unavoidable physical singularity: if **-Z itself points almost vertically up/down**, its horizontal projection approaches zero, so the azimuth of that direction is not well-defined. The firmware detects this and reports HDG=HOLD instead of producing a random angle.
+Có một giới hạn vật lý không thể loại bỏ: nếu **-Z gần thẳng đứng**, hình chiếu ngang của hướng tiến gần bằng 0 nên góc phương vị của chính vector này không còn xác định tốt. Firmware sẽ báo `HDG=HOLD` thay vì xuất một góc ngẫu nhiên.
 
-## On-device calibration only
+## Hiệu chuẩn hoàn toàn trên module
 
-No Python, MATLAB, desktop fitting tool, CSV export, or external calibration program is required.
+Không cần Python, MATLAB, file CSV hay công cụ hiệu chuẩn trên PC.
 
-All calibration is done through **Arduino Serial Monitor** and saved in ESP32 NVS.
+Toàn bộ quá trình hiệu chuẩn được thực hiện qua **Arduino Serial Monitor** và kết quả được lưu vào **NVS của ESP32**.
 
-### Magnetometer
+### Hiệu chuẩn từ kế
 
-The firmware gathers 3D HMC5883L samples and performs an embedded ellipsoid least-squares fit:
+Firmware thu các mẫu 3D của HMC5883L và tự fit ellipsoid ngay trên ESP32:
 
 ~~~text
 (x-c)^T Q (x-c) = 1
 ~~~
 
-From that fit it obtains:
+Từ đó firmware xác định:
 
-- hard-iron center offset c
-- full symmetric 3x3 soft-iron / cross-axis correction matrix
-- fit RMS error
-- correction condition number
+- tâm lệch hard-iron `c`
+- ma trận hiệu chỉnh soft-iron 3x3
+- thành phần sai lệch chéo giữa các trục
+- sai số RMS của phép fit
+- condition number để đánh giá chất lượng hiệu chuẩn
 
-The fitted matrix maps the measured ellipsoid back toward a sphere.
+Ma trận thu được biến ellipsoid đo được trở lại gần hình cầu đơn vị.
 
-### Accelerometer
+### Hiệu chuẩn gia tốc kế
 
-ADXL345 is calibrated with the same 3D ellipsoid approach while the module is rotated slowly through all orientations. Obvious high-dynamic-acceleration samples are rejected before fitting.
+ADXL345 được hiệu chuẩn theo mô hình ellipsoid 3D tương tự. Trong quá trình lấy mẫu, firmware loại bỏ những mẫu có gia tốc động quá lớn để tránh làm sai việc xác định 1 g.
 
-### Gyroscope
+### Hiệu chuẩn gyro
 
-ITG-3205 zero-rate bias is averaged while the module is stationary. The routine also measures standard deviation and rejects calibration if the module moved too much.
+ITG-3205 được lấy trung bình zero-rate bias khi module đứng yên. Firmware cũng tính độ lệch chuẩn và từ chối lưu nếu phát hiện module bị di chuyển quá nhiều trong lúc hiệu chuẩn.
 
-## Wiring: ESP32
+## Đấu nối ESP32
 
-Recommended direct 3.3 V wiring:
+Khuyến nghị dùng mức 3.3 V:
 
 | GY-85 | ESP32 |
 |---|---|
@@ -95,34 +96,38 @@ Recommended direct 3.3 V wiring:
 | SDA | GPIO 21 |
 | SCL | GPIO 22 |
 
-Default pins can be changed at the top of laban4.ino:
+Có thể đổi chân ở đầu file `laban4.ino`:
 
 ~~~cpp
 #define LABAN4_SDA 21
 #define LABAN4_SCL 22
 ~~~
 
-The firmware uses 400 kHz I2C.
+Firmware chạy I2C ở 400 kHz.
 
-## Arduino IDE
+## Nạp bằng Arduino IDE
 
-1. Install the ESP32 Arduino core.
-2. Open laban4.ino.
-3. Select the correct ESP32 board and COM port.
-4. Upload.
-5. Open Serial Monitor at **115200 baud** with newline enabled.
+1. Cài ESP32 Arduino core.
+2. Mở `laban4.ino`.
+3. Chọn đúng board ESP32 và cổng COM.
+4. Upload firmware.
+5. Mở Serial Monitor ở **115200 baud**, bật gửi ký tự xuống dòng.
 
-No third-party Arduino sensor library is required. The sketch only uses ESP32/Arduino core components: Arduino.h, Wire.h and Preferences.h.
+Firmware không cần thư viện cảm biến bên thứ ba. Chỉ sử dụng các thành phần có sẵn của ESP32 Arduino core:
 
-## First startup
+- `Arduino.h`
+- `Wire.h`
+- `Preferences.h`
 
-Run:
+## Khởi động lần đầu
+
+Gõ:
 
 ~~~text
 scan
 ~~~
 
-Expected devices:
+Kết quả mong đợi:
 
 ~~~text
 0x1E HMC5883L
@@ -130,53 +135,55 @@ Expected devices:
 0x68 ITG3205
 ~~~
 
-Then run the full calibration:
+Sau đó chạy hiệu chuẩn đầy đủ:
 
 ~~~text
 cal all
 ~~~
 
-The sequence is:
+Quy trình:
 
-1. Keep the module completely still for the gyro calibration.
-2. After the prompt changes to 3D calibration, slowly rotate the module through as many orientations as possible for about 40 seconds.
-3. Use broad figure-eight motions.
-4. Make every positive and negative module axis point upward/downward at some point.
-5. Keep the sensor away from steel tables, magnets, loudspeakers, motors, power transformers, large batteries and high-current wiring.
+1. Giữ module **hoàn toàn đứng yên** trong bước hiệu chuẩn gyro.
+2. Khi Serial chuyển sang hiệu chuẩn 3D, xoay module chậm qua càng nhiều tư thế càng tốt trong khoảng 40 giây.
+3. Thực hiện chuyển động số 8 rộng.
+4. Lần lượt đưa cả hai chiều ±X, ±Y, ±Z lên trên/xuống dưới để phủ đủ không gian 3D.
+5. Tránh bàn thép, nam châm, loa, động cơ, biến áp, pin lớn và dây dòng cao.
 
-The accepted calibration is automatically written to NVS.
+Nếu chất lượng fit đạt yêu cầu, dữ liệu sẽ tự lưu vào NVS.
 
-Check it with:
+Kiểm tra bằng:
 
 ~~~text
 status
 ~~~
 
-## Serial commands
+## Các lệnh Serial Monitor
 
-| Command | Function |
+Tên lệnh được giữ bằng tiếng Anh để ngắn và ổn định:
+
+| Lệnh | Chức năng |
 |---|---|
-| help | command list |
-| status | calibration flags, matrices, maps, settings |
-| scan | I2C scan |
-| raw | one raw and calibrated sensor sample |
-| heading | print one current heading |
-| stream on / stream off | continuous heading output |
-| rate 10 | output rate from 1 to 50 Hz |
-| decl 0.0 | east-positive magnetic declination in degrees |
-| cal gyro | stationary gyro-bias calibration |
-| cal accel | 30 s accelerometer ellipsoid calibration |
-| cal mag | 40 s magnetometer ellipsoid calibration |
-| cal all | complete gyro + accel + magnetometer calibration |
-| map show | show signed sensor-to-body mappings |
-| map accel +x +y +z | set accel signed axis permutation |
-| map gyro +x +y +z | set gyro signed axis permutation |
-| map mag +x +y +z | set magnetometer signed axis permutation |
-| factory reset | restore defaults |
+| `help` | hiện danh sách lệnh |
+| `status` | xem trạng thái hiệu chuẩn, ma trận, mapping và heading |
+| `scan` | quét thiết bị I2C |
+| `raw` | in một mẫu dữ liệu thô và dữ liệu đã hiệu chỉnh |
+| `heading` | in heading hiện tại một lần |
+| `stream on` / `stream off` | bật/tắt xuất heading liên tục |
+| `rate 10` | đặt tốc độ xuất từ 1 đến 50 dòng/giây |
+| `decl 0.0` | đặt độ từ thiên, phía Đông là số dương |
+| `cal gyro` | hiệu chuẩn bias gyro khi đứng yên |
+| `cal accel` | hiệu chuẩn ellipsoid gia tốc kế trong 30 giây |
+| `cal mag` | hiệu chuẩn hard/soft-iron từ kế trong 40 giây |
+| `cal all` | chạy toàn bộ gyro + accel + mag |
+| `map show` | xem ánh xạ trục cảm biến sang hệ trục cơ thể |
+| `map accel +x +y +z` | đặt ánh xạ trục gia tốc kế |
+| `map gyro +x +y +z` | đặt ánh xạ trục gyro |
+| `map mag +x +y +z` | đặt ánh xạ trục từ kế |
+| `factory reset` | xóa hiệu chuẩn/cài đặt và về mặc định |
 
-## Sensor-to-body axis mapping
+## Ánh xạ trục cảm biến sang hệ trục cơ thể
 
-The default assumes sensor axes follow the GY-85 module axes:
+Mặc định firmware giả sử trục cảm biến cùng chiều với trục module:
 
 ~~~text
 body X = +sensor X
@@ -184,19 +191,21 @@ body Y = +sensor Y
 body Z = +sensor Z
 ~~~
 
-This is stored as:
+Biểu diễn bằng:
 
 ~~~text
 +x +y +z
 ~~~
 
-Some GY-85 clones or board revisions may mount a sensor with a different signed permutation. You do **not** need to edit the source. Change it in Serial Monitor, for example:
+Nếu bo GY-85 thực tế có cảm biến được hàn khác hướng, không cần sửa source. Có thể đổi trực tiếp qua Serial Monitor.
+
+Ví dụ:
 
 ~~~text
 map mag +y -x +z
 ~~~
 
-That means:
+Nghĩa là:
 
 ~~~text
 body X = +mag Y
@@ -204,80 +213,80 @@ body Y = -mag X
 body Z = +mag Z
 ~~~
 
-Each of X/Y/Z must be used exactly once. After changing a map, run the corresponding calibration again.
+Mỗi trục X/Y/Z phải xuất hiện đúng một lần. Sau khi đổi mapping nên chạy lại hiệu chuẩn của cảm biến tương ứng.
 
-## Setting magnetic declination
+## Đặt độ từ thiên
 
-The compass naturally returns magnetic-north heading. To obtain true-north heading:
+La bàn từ mặc định chỉ hướng Bắc từ. Muốn quy đổi sang Bắc thật:
 
 ~~~text
-decl <degrees>
+decl <độ>
 ~~~
 
-Convention:
+Quy ước:
 
-- east declination: positive
-- west declination: negative
+- độ từ thiên phía Đông: số dương
+- độ từ thiên phía Tây: số âm
 
-Example only:
+Ví dụ minh họa:
 
 ~~~text
 decl 1.25
 ~~~
 
-Use the current declination for the actual operating location; do not copy the example value.
+Không nên dùng cố định giá trị ví dụ này. Hãy dùng độ từ thiên phù hợp với vị trí và thời điểm thực tế.
 
-## Output example
+## Ví dụ dữ liệu xuất ra
 
 ~~~text
-HDG=123.42 deg ESE  raw=124.01  A=1.004  M=0.996  forwardH=0.931  GAM
+HUONG=123.42 do ESE  tho=124.01  A=1.004  M=0.996  ngangTien=0.931  GAM
 ~~~
 
-Where:
+Ý nghĩa:
 
-- HDG: filtered true/magnetic heading depending on decl
-- raw: unfiltered heading before circular smoothing
-- A: calibrated accelerometer magnitude, ideally near 1 g when quasi-static
-- M: calibrated magnetometer magnitude, ideally near 1 after accepted mag fit
-- forwardH: length of horizontal projection of body -Z
-- GAM: gyro, accel and magnetometer calibrations are present
+- `HUONG`: heading sau lọc
+- `tho`: heading chưa qua lọc tròn
+- `A`: độ lớn vector gia tốc đã hiệu chỉnh, gần 1 khi gần tĩnh
+- `M`: độ lớn vector từ trường đã hiệu chỉnh, gần 1 sau khi calibration tốt
+- `ngangTien`: độ lớn hình chiếu ngang của hướng tiến -Z
+- `GAM`: đã có hiệu chuẩn Gyro + Accelerometer + Magnetometer
 
-forwardH approaching zero means the requested forward axis is approaching vertical, where azimuth becomes ill-conditioned.
+Nếu `ngangTien` tiến gần 0 thì -Z đang gần thẳng đứng và heading của hướng này trở nên kém xác định.
 
-## Practical verification
+## Cách kiểm tra sau hiệu chuẩn
 
-After cal all:
+Sau khi chạy `cal all`:
 
-1. Keep the module away from metal.
-2. Point body **-Z** toward a known north reference.
-3. Note heading.
-4. Tilt/roll the module substantially while keeping the **horizontal projection of -Z** aimed in the same direction.
-5. The heading should remain close to the original value.
-6. Repeat facing east, south and west.
-7. If heading changes strongly with tilt, first inspect A, M, axis maps and magnetic surroundings before changing filtering constants.
+1. Đưa module ra xa kim loại.
+2. Hướng **-Z** về một hướng Bắc tham chiếu đáng tin cậy.
+3. Ghi lại heading.
+4. Nghiêng/roll module nhưng vẫn giữ hình chiếu ngang của **-Z** theo cùng hướng.
+5. Heading phải giữ tương đối ổn định.
+6. Lặp lại với Đông, Nam và Tây.
+7. Nếu heading thay đổi mạnh khi nghiêng, kiểm tra lại giá trị A, M, mapping trục và môi trường từ trước khi chỉnh hệ số lọc.
 
-## Important limits
+## Giới hạn cần lưu ý
 
-- HMC5883L is an older magnetometer and many low-cost modules contain clones or substituted parts.
-- This firmware expects an HMC5883L-compatible device at 0x1E. QMC5883L devices commonly found at 0x0D are a different chip/register map and are not silently treated as HMC5883L.
-- Nearby ferromagnetic material can invalidate any compass, even after a good calibration.
-- Calibration should be performed with the sensor installed in its final wearable assembly, because screws, batteries and wiring can change the magnetic distortion.
-- Strong linear acceleration temporarily corrupts gravity inferred from the accelerometer. The gyro propagation reduces that effect, but an old GY-85 cannot match the dynamic performance of a modern factory-calibrated phone IMU.
-- Heading of the chosen body direction is mathematically undefined when that direction is vertical. The code explicitly detects this geometry.
+- HMC5883L là cảm biến cũ; nhiều module giá rẻ có thể dùng clone hoặc chip thay thế.
+- Firmware này yêu cầu thiết bị tương thích HMC5883L ở địa chỉ `0x1E`. QMC5883L thường ở `0x0D` dùng register map khác và không được tự động coi là HMC5883L.
+- Kim loại sắt từ ở gần có thể làm sai la bàn dù calibration đã tốt.
+- Nên calibration khi GY-85 đã được lắp vào đúng cụm wearable cuối cùng, vì vít, pin và dây dẫn có thể làm thay đổi từ trường.
+- Gia tốc tuyến tính mạnh làm sai tạm thời vector trọng lực từ accelerometer. Gyro giúp giảm ảnh hưởng nhưng GY-85 đời cũ không thể đạt hiệu năng động như IMU điện thoại hiện đại đã được nhà sản xuất hiệu chuẩn.
+- Khi chính hướng tiến -Z gần thẳng đứng, azimuth của vector đó về mặt toán học không xác định tốt.
 
-## Technical references
+## Tài liệu kỹ thuật tham khảo
 
-The implementation follows the physical model used in established eCompass literature:
+Thuật toán dựa trên mô hình vật lý eCompass đã được công bố:
 
-- NXP/Freescale AN4248, Implementing a Tilt-Compensated eCompass using Accelerometer and Magnetometer Sensors:
+- NXP/Freescale AN4248 — *Implementing a Tilt-Compensated eCompass using Accelerometer and Magnetometer Sensors*  
   https://www.nxp.com/docs/en/application-note/AN4248.pdf
-- NXP/Freescale AN4246, Calibrating an eCompass in the Presence of Hard- and Soft-Iron Interference:
+- NXP/Freescale AN4246 — *Calibrating an eCompass in the Presence of Hard- and Soft-Iron Interference*  
   https://www.nxp.com/docs/en/application-note/AN4246.pdf
-- Analog Devices ADXL345 data sheet:
+- Analog Devices — ADXL345 Data Sheet  
   https://www.analog.com/media/en/technical-documentation/data-sheets/ADXL345.pdf
-- TDK/InvenSense ITG-3200 product specification:
+- TDK/InvenSense — ITG-3200 Product Specification  
   https://invensense.tdk.com/wp-content/uploads/2015/02/ITG-3200-Datasheet.pdf
-- Honeywell HMC5883L data sheet mirror:
+- Honeywell — HMC5883L Data Sheet  
   https://cdn-shop.adafruit.com/datasheets/HMC5883L_3-Axis_Digital_Compass_IC.pdf
 
-See docs/ALGORITHM.md for the equations implemented in the sketch.
+Xem thêm `docs/ALGORITHM.md` để đọc chi tiết các phương trình được triển khai trong firmware.
