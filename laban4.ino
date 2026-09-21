@@ -1,32 +1,33 @@
 /*
-  laban4 - ESP32 + GY-85 wearable tilt-compensated compass
+  laban4 - La bàn đeo người ESP32 + GY-85 có bù nghiêng
 
-  GY-85 sensors:
-    ADXL345  : 3-axis accelerometer, I2C 0x53
-    ITG-3205 : 3-axis gyroscope,     I2C 0x68
-    HMC5883L : 3-axis magnetometer,  I2C 0x1E
+  Các cảm biến trên GY-85:
+    ADXL345  : gia tốc kế 3 trục,          I2C 0x53
+    ITG-3205 : con quay hồi chuyển 3 trục, I2C 0x68
+    HMC5883L : từ kế 3 trục,               I2C 0x1E
 
-  Project body frame:
-    +X = toward wearer's head
-    +Y = toward wearer's left
-    +Z = into wearer's body
-    -Z = forward / travel direction
+  Hệ trục cơ thể của dự án:
+    +X = hướng lên đầu người đeo
+    +Y = hướng sang tay trái người đeo
+    +Z = hướng vào trong cơ thể
+    -Z = hướng tiến / hướng di chuyển cần xác định
 
-  Heading is NOT computed from atan2(mx,my) on a level board. Instead:
-    1) gravity/up is estimated from accelerometer + gyro complementary fusion,
-    2) magnetic field is projected onto the gravity-horizontal plane,
-    3) body forward (-Z) is projected onto the same plane,
-    4) heading is the signed angle from magnetic north to projected forward.
+  Heading KHÔNG được tính trực tiếp bằng atan2(mx,my) khi bo nằm ngang.
+  Thay vào đó:
+    1) ước lượng vector trọng lực/hướng lên bằng gia tốc kế + gyro,
+    2) chiếu vector từ trường lên mặt phẳng ngang vuông góc trọng lực,
+    3) chiếu hướng tiến của cơ thể (-Z) lên cùng mặt phẳng,
+    4) heading là góc có dấu từ Bắc từ đến hướng tiến đã chiếu.
 
-  Calibration is fully on-device through Serial Monitor:
+  Toàn bộ hiệu chuẩn chạy trực tiếp trên module qua Serial Monitor:
     cal gyro
     cal accel
     cal mag
     cal all
 
-  No external Python/tool is required.
+  Không cần Python hay công cụ hiệu chuẩn bên ngoài.
 
-  Target: ESP32 Arduino core.
+  Nền tảng đích: ESP32 Arduino core.
 */
 
 #include <Arduino.h>
@@ -53,7 +54,7 @@ static constexpr float DEG2RAD_F = 0.01745329251994329577f;
 static constexpr float RAD2DEG_F = 57.295779513082320876f;
 static constexpr float ITG3205_LSB_PER_DPS = 14.375f;
 
-// 25 Hz * 40 s = 1000 samples. Capacity leaves margin.
+// 25 Hz * 40 s = 1000 mẫu. Dung lượng 1200 mẫu để chừa biên.
 static constexpr int CAL_MAX_SAMPLES = 1200;
 
 struct Raw3 {
@@ -101,26 +102,26 @@ struct CalibrationData {
   uint16_t version;
   uint16_t flags;
 
-  // raw gyro counts at zero angular rate
+  // Giá trị thô của gyro khi vận tốc góc bằng 0.
   float gyroBias[3];
 
-  // Corrected vector = matrix * (raw - center).
-  // For accel and mag, a successful ellipsoid calibration maps samples to
-  // approximately a unit sphere.
+  // Vector đã hiệu chỉnh = ma trận * (dữ liệu thô - tâm).
+  // Với gia tốc kế và từ kế, hiệu chuẩn ellipsoid thành công sẽ đưa các mẫu
+  // về gần một hình cầu đơn vị.
   float accelCenter[3];
   float accelMatrix[9];
   float magCenter[3];
   float magMatrix[9];
 
-  // Signed-permutation mapping from each sensor's corrected axes into body axes.
-  // Example {+1,+2,+3}: body X=+sensor X, body Y=+sensor Y, body Z=+sensor Z.
-  // Values are +/-1, +/-2, +/-3 and absolute values must be unique.
+  // Ánh xạ hoán vị có dấu từ trục đã hiệu chỉnh của cảm biến sang trục cơ thể.
+  // Ví dụ {+1,+2,+3}: X cơ thể=+X cảm biến, Y cơ thể=+Y cảm biến, Z cơ thể=+Z cảm biến.
+  // Giá trị là +/-1, +/-2, +/-3 và trị tuyệt đối không được trùng nhau.
   int8_t accelMap[3];
   int8_t gyroMap[3];
   int8_t magMap[3];
   int8_t reservedMap;
 
-  // East-positive declination. true_heading = magnetic_heading + declination.
+  // Độ từ thiên phía Đông là số dương. heading_thật = heading_từ + độ_từ_thiên.
   float declinationDeg;
 
   uint16_t outputHz;
@@ -158,7 +159,7 @@ uint32_t lastUpdateUs = 0;
 uint32_t lastPrintMs = 0;
 String serialLine;
 
-// ---------- persistent calibration ----------
+// ---------- lưu dữ liệu hiệu chuẩn lâu dài ----------
 
 uint32_t crc32Bytes(const uint8_t *data, size_t len) {
   uint32_t crc = 0xFFFFFFFFUL;
@@ -190,11 +191,11 @@ void setCalibrationDefaults() {
   cal.version = CAL_VERSION;
   cal.flags = 0;
 
-  // ADXL345 full-resolution scale is nominally about 256 counts/g.
+  // Ở chế độ full-resolution, ADXL345 có tỷ lệ danh định khoảng 256 count/g.
   setDiag(cal.accelMatrix, 1.0f/256.0f, 1.0f/256.0f, 1.0f/256.0f);
 
-  // HMC5883L default gain is nominally 1090 LSB/Gauss. This uncalibrated
-  // fallback gives a physically scaled vector; ellipsoid calibration replaces it.
+  // Gain mặc định của HMC5883L danh định là 1090 LSB/Gauss. Khi chưa hiệu chuẩn,
+  // hệ số này chỉ tạo scale ban đầu; hiệu chuẩn ellipsoid sẽ thay thế nó.
   setDiag(cal.magMatrix, 1.0f/1090.0f, 1.0f/1090.0f, 1.0f/1090.0f);
 
   setIdentityMap(cal.accelMap);
@@ -250,7 +251,7 @@ bool loadCalibration() {
   return true;
 }
 
-// ---------- I2C / sensor drivers ----------
+// ---------- I2C / trình điều khiển cảm biến ----------
 
 bool i2cPing(uint8_t addr) {
   Wire.beginTransmission(addr);
@@ -281,13 +282,13 @@ bool initADXL345() {
   uint8_t id = 0;
   if (!readRegs(ADXL345_ADDR, 0x00, &id, 1)) return false;
   if (id != 0xE5) {
-    Serial.printf("[WARN] ADXL345 DEVID=0x%02X, expected 0xE5\n", id);
+    Serial.printf("[CẢNH BÁO] ADXL345 DEVID=0x%02X, giá trị mong đợi 0xE5\n", id);
   }
 
-  if (!writeReg(ADXL345_ADDR, 0x2D, 0x00)) return false; // standby
-  if (!writeReg(ADXL345_ADDR, 0x31, 0x09)) return false; // full-res, +/-4 g
+  if (!writeReg(ADXL345_ADDR, 0x2D, 0x00)) return false; // chế độ chờ
+  if (!writeReg(ADXL345_ADDR, 0x31, 0x09)) return false; // full-resolution, +/-4 g
   if (!writeReg(ADXL345_ADDR, 0x2C, 0x0A)) return false; // 100 Hz
-  if (!writeReg(ADXL345_ADDR, 0x2D, 0x08)) return false; // measure
+  if (!writeReg(ADXL345_ADDR, 0x2D, 0x08)) return false; // chế độ đo
   delay(10);
   return true;
 }
@@ -295,9 +296,9 @@ bool initADXL345() {
 bool initITG3205() {
   if (!i2cPing(ITG3205_ADDR)) return false;
 
-  writeReg(ITG3205_ADDR, 0x3E, 0x80); // device reset
+  writeReg(ITG3205_ADDR, 0x3E, 0x80); // đặt lại thiết bị
   delay(60);
-  if (!writeReg(ITG3205_ADDR, 0x3E, 0x01)) return false; // PLL with X gyro ref
+  if (!writeReg(ITG3205_ADDR, 0x3E, 0x01)) return false; // PLL dùng gyro X làm tham chiếu
   if (!writeReg(ITG3205_ADDR, 0x15, 9)) return false;    // 1 kHz/(9+1)=100 Hz
   if (!writeReg(ITG3205_ADDR, 0x16, 0x1B)) return false; // FS=2000 dps, DLPF=42 Hz
   delay(10);
@@ -310,14 +311,14 @@ bool initHMC5883L() {
   uint8_t id[3] = {0,0,0};
   if (readRegs(HMC5883L_ADDR, 0x0A, id, 3)) {
     if (!(id[0] == 'H' && id[1] == '4' && id[2] == '3')) {
-      Serial.printf("[WARN] HMC5883L ID='%c%c%c'. Clone/compatible device may behave differently.\n",
+      Serial.printf("[CẢNH BÁO] HMC5883L ID='%c%c%c'. Chip clone/tương thích có thể hoạt động khác.\n",
                     id[0], id[1], id[2]);
     }
   }
 
-  if (!writeReg(HMC5883L_ADDR, 0x00, 0x78)) return false; // 8-average, 75 Hz, normal
+  if (!writeReg(HMC5883L_ADDR, 0x00, 0x78)) return false; // trung bình 8 mẫu, 75 Hz, chế độ bình thường
   if (!writeReg(HMC5883L_ADDR, 0x01, 0x20)) return false; // +/-1.3 G, 1090 LSB/G
-  if (!writeReg(HMC5883L_ADDR, 0x02, 0x00)) return false; // continuous mode
+  if (!writeReg(HMC5883L_ADDR, 0x02, 0x00)) return false; // chế độ đo liên tục
   delay(20);
   return true;
 }
@@ -327,9 +328,9 @@ bool initSensors() {
   const bool g = initITG3205();
   const bool m = initHMC5883L();
 
-  Serial.printf("ADXL345 : %s\n", a ? "OK" : "FAIL");
-  Serial.printf("ITG3205 : %s\n", g ? "OK" : "FAIL");
-  Serial.printf("HMC5883L: %s\n", m ? "OK" : "FAIL");
+  Serial.printf("ADXL345 : %s\n", a ? "OK" : "LỖI");
+  Serial.printf("ITG3205 : %s\n", g ? "OK" : "LỖI");
+  Serial.printf("HMC5883L: %s\n", m ? "OK" : "LỖI");
 
   sensorsReady = a && g && m;
   return sensorsReady;
@@ -357,17 +358,17 @@ bool readMagRaw(Raw3 &r) {
   uint8_t b[6];
   if (!readRegs(HMC5883L_ADDR, 0x03, b, 6)) return false;
 
-  // HMC5883L register order is X, Z, Y (big endian).
+  // Thứ tự thanh ghi HMC5883L là X, Z, Y (big endian).
   r.x = (int16_t)(((uint16_t)b[0] << 8) | b[1]);
   r.z = (int16_t)(((uint16_t)b[2] << 8) | b[3]);
   r.y = (int16_t)(((uint16_t)b[4] << 8) | b[5]);
 
-  // HMC5883L reports -4096 on overflow/saturation.
+  // HMC5883L trả về -4096 khi tràn/bão hòa.
   if (r.x == -4096 || r.y == -4096 || r.z == -4096) return false;
   return true;
 }
 
-// ---------- calibration application / axis mapping ----------
+// ---------- áp dụng hiệu chuẩn / ánh xạ trục ----------
 
 Vec3 applyMatrixCalibration(const Raw3 &r, const float center[3], const float M[9]) {
   const float d0 = (float)r.x - center[0];
@@ -410,15 +411,15 @@ Vec3 calibratedGyroBody(const Raw3 &r) {
   return applyAxisMap(s, cal.gyroMap);
 }
 
-// ---------- full 3D ellipsoid fit ----------
-// Algebraic fit:
+// ---------- fit ellipsoid 3D đầy đủ ----------
+// Dạng fit đại số:
 //   x^T A x + b^T x = 1
-// Then center c = -0.5 A^-1 b.
-// With y=x-c: y^T Q y = 1, Q=A/(1+c^T A c).
-// The correction sqrt(Q) maps the ellipsoid to a sphere.
+// Khi đó tâm c = -0.5 A^-1 b.
+// Với y=x-c: y^T Q y = 1, Q=A/(1+c^T A c).
+// Ma trận hiệu chỉnh sqrt(Q) biến ellipsoid về hình cầu.
 //
-// This captures hard-iron offset plus a symmetric 3x3 soft-iron/cross-axis
-// correction without requiring a PC-side fitter.
+// Cách này bù offset hard-iron cùng ma trận đối xứng 3x3 cho soft-iron/tương tác chéo
+// mà không cần chương trình fit trên máy tính.
 
 bool solve9(double aug[9][10], double out[9]) {
   for (int col = 0; col < 9; ++col) {
@@ -552,7 +553,7 @@ bool fitEllipsoid(const Raw3 *samples, int n, float normalization,
   double aug[9][10];
   for (int r = 0; r < 9; ++r) {
     for (int c = 0; c < 9; ++c) aug[r][c] = normal[r][c];
-    // Tiny regularization against nearly singular sample sets.
+    // Regularization rất nhỏ để hạn chế tập mẫu gần suy biến.
     aug[r][r] += 1.0e-10;
     aug[r][9] = rhs[r];
   }
@@ -651,12 +652,12 @@ void sampleSpans(const Raw3 *s, int n, int32_t span[3]) {
   for (int a = 0; a < 3; ++a) span[a] = (int32_t)mx[a] - (int32_t)mn[a];
 }
 
-// ---------- calibration routines ----------
+// ---------- các hàm hiệu chuẩn ----------
 
 bool calibrateGyro() {
   Serial.println();
-  Serial.println("=== GYRO CALIBRATION ===");
-  Serial.println("Keep the module completely STILL for 5 seconds.");
+  Serial.println("=== HIỆU CHUẨN GYRO ===");
+  Serial.println("Giữ module HOÀN TOÀN ĐỨNG YÊN trong 5 giây.");
   delay(1000);
 
   const int N = 500;
@@ -679,7 +680,7 @@ bool calibrateGyro() {
   }
 
   if (good < N*9/10) {
-    Serial.println("[FAIL] Too many gyro I2C read errors.");
+    Serial.println("[LỖI] Có quá nhiều lần đọc gyro qua I2C thất bại.");
     return false;
   }
 
@@ -693,37 +694,37 @@ bool calibrateGyro() {
     if (sdDps[a] > 2.5f) stable = false;
   }
 
-  Serial.printf("bias raw: X=%.2f Y=%.2f Z=%.2f\n", mean[0], mean[1], mean[2]);
-  Serial.printf("noise sd: X=%.2f Y=%.2f Z=%.2f deg/s\n", sdDps[0], sdDps[1], sdDps[2]);
+  Serial.printf("bias thô: X=%.2f Y=%.2f Z=%.2f\n", mean[0], mean[1], mean[2]);
+  Serial.printf("độ lệch chuẩn nhiễu: X=%.2f Y=%.2f Z=%.2f độ/s\n", sdDps[0], sdDps[1], sdDps[2]);
 
   if (!stable) {
-    Serial.println("[FAIL] Module moved during calibration. Retry on a stable surface.");
+    Serial.println("[LỖI] Module đã bị di chuyển khi hiệu chuẩn. Hãy đặt trên bề mặt ổn định và thử lại.");
     return false;
   }
 
   memcpy(cal.gyroBias, mean, sizeof(mean));
   cal.flags |= CAL_GYRO;
   if (!saveCalibration()) {
-    Serial.println("[WARN] Calibration computed but NVS save failed.");
+    Serial.println("[CẢNH BÁO] Đã tính xong hiệu chuẩn nhưng lưu NVS thất bại.");
   }
-  Serial.println("[OK] Gyro bias saved.");
+  Serial.println("[OK] Đã lưu bias gyro.");
   return true;
 }
 
 bool calibrateVectors(bool doAccel, bool doMag, uint32_t durationMs) {
   Serial.println();
-  Serial.println("=== 3D VECTOR CALIBRATION ===");
+  Serial.println("=== HIỆU CHUẨN VECTOR 3D ===");
   if (doAccel && doMag) {
-    Serial.println("Accelerometer + magnetometer will be calibrated together.");
+    Serial.println("Gia tốc kế và từ kế sẽ được hiệu chuẩn cùng lúc.");
   } else if (doAccel) {
-    Serial.println("Accelerometer calibration.");
+    Serial.println("Đang hiệu chuẩn gia tốc kế.");
   } else {
-    Serial.println("Magnetometer calibration.");
+    Serial.println("Đang hiệu chuẩn từ kế.");
   }
-  Serial.println("Rotate the module SLOWLY through every orientation.");
-  Serial.println("Use large 3D figure-eight motions and make every +/- axis point up/down.");
-  Serial.println("Keep away from steel, magnets, speakers, motors and high-current wiring.");
-  Serial.println("Starting in 3 seconds...");
+  Serial.println("Xoay module CHẬM qua tất cả các tư thế có thể.");
+  Serial.println("Thực hiện chuyển động số 8 rộng trong không gian 3D và lần lượt đưa mọi trục +/- lên trên/xuống dưới.");
+  Serial.println("Giữ xa thép, nam châm, loa, động cơ và dây dẫn dòng điện lớn.");
+  Serial.println("Bắt đầu sau 3 giây...");
   delay(3000);
 
   int na = 0, nm = 0;
@@ -734,7 +735,7 @@ bool calibrateVectors(bool doAccel, bool doMag, uint32_t durationMs) {
     if (doAccel && na < CAL_MAX_SAMPLES) {
       Raw3 a;
       if (readAccelRaw(a)) {
-        // Nominal static magnitude is around 256 counts. Discard obvious motion shocks.
+        // Khi tĩnh, độ lớn danh định khoảng 256 count. Loại các mẫu bị xung gia tốc rõ rệt.
         const float nn = sqrtf((float)a.x*a.x + (float)a.y*a.y + (float)a.z*a.z);
         if (nn > 150.0f && nn < 370.0f) accelCalSamples[na++] = a;
       }
@@ -760,76 +761,76 @@ bool calibrateVectors(bool doAccel, bool doMag, uint32_t durationMs) {
   if (doAccel) {
     int32_t span[3] = {0,0,0};
     sampleSpans(accelCalSamples, na, span);
-    Serial.printf("Accel span raw: X=%ld Y=%ld Z=%ld\n",
+    Serial.printf("Biên dữ liệu thô gia tốc kế: X=%ld Y=%ld Z=%ld\n",
                   (long)span[0], (long)span[1], (long)span[2]);
 
     float center[3], M[9], rms=0, cond=0;
     const bool coverage = span[0] > 330 && span[1] > 330 && span[2] > 330;
     const bool fit = coverage && fitEllipsoid(accelCalSamples, na, 256.0f,
                                                center, M, rms, cond);
-    Serial.printf("Accel fit: samples=%d rms=%.4f condition=%.2f\n", na, rms, cond);
+    Serial.printf("Fit gia tốc kế: mẫu=%d rms=%.4f condition=%.2f\n", na, rms, cond);
 
     if (fit && rms < 0.14f && cond < 3.0f) {
       memcpy(cal.accelCenter, center, sizeof(center));
       memcpy(cal.accelMatrix, M, sizeof(M));
       cal.flags |= CAL_ACCEL;
       anySaved = true;
-      Serial.println("[OK] Accelerometer ellipsoid calibration accepted.");
+      Serial.println("[OK] Hiệu chuẩn ellipsoid gia tốc kế đạt yêu cầu.");
     } else {
-      Serial.println("[FAIL] Accelerometer coverage/fit is poor. Rotate more slowly through ALL axes and retry.");
+      Serial.println("[LỖI] Dữ liệu/fit gia tốc kế chưa đạt. Hãy xoay chậm hơn qua TẤT CẢ các trục rồi thử lại.");
     }
   }
 
   if (doMag) {
     int32_t span[3] = {0,0,0};
     sampleSpans(magCalSamples, nm, span);
-    Serial.printf("Mag span raw: X=%ld Y=%ld Z=%ld\n",
+    Serial.printf("Biên dữ liệu thô từ kế: X=%ld Y=%ld Z=%ld\n",
                   (long)span[0], (long)span[1], (long)span[2]);
 
     float center[3], M[9], rms=0, cond=0;
     const bool coverage = span[0] > 260 && span[1] > 260 && span[2] > 260;
     const bool fit = coverage && fitEllipsoid(magCalSamples, nm, 500.0f,
                                                center, M, rms, cond);
-    Serial.printf("Mag fit: samples=%d rms=%.4f condition=%.2f\n", nm, rms, cond);
+    Serial.printf("Fit từ kế: mẫu=%d rms=%.4f condition=%.2f\n", nm, rms, cond);
 
     if (fit && rms < 0.18f && cond < 8.0f) {
       memcpy(cal.magCenter, center, sizeof(center));
       memcpy(cal.magMatrix, M, sizeof(M));
       cal.flags |= CAL_MAG;
       anySaved = true;
-      Serial.println("[OK] Magnetometer hard/soft-iron ellipsoid calibration accepted.");
+      Serial.println("[OK] Hiệu chuẩn ellipsoid hard/soft-iron của từ kế đạt yêu cầu.");
     } else {
-      Serial.println("[FAIL] Magnetometer coverage/fit is poor. Move away from magnetic interference and retry.");
+      Serial.println("[LỖI] Dữ liệu/fit từ kế chưa đạt. Hãy tránh nguồn nhiễu từ và thử lại.");
     }
   }
 
   if (anySaved) {
-    if (saveCalibration()) Serial.println("[OK] Calibration saved to ESP32 NVS.");
-    else Serial.println("[WARN] Calibration computed but NVS save failed.");
+    if (saveCalibration()) Serial.println("[OK] Đã lưu dữ liệu hiệu chuẩn vào NVS của ESP32.");
+    else Serial.println("[CẢNH BÁO] Đã tính xong hiệu chuẩn nhưng lưu NVS thất bại.");
   }
   return anySaved;
 }
 
 void calibrateAll() {
   Serial.println();
-  Serial.println("========== LABAN4 FULL CALIBRATION ==========");
-  Serial.println("Step 1/2: gyro zero-rate bias.");
+  Serial.println("========== HIỆU CHUẨN TOÀN BỘ LABAN4 ==========");
+  Serial.println("Bước 1/2: hiệu chuẩn bias gyro khi đứng yên.");
   if (!calibrateGyro()) {
-    Serial.println("[STOP] Fix gyro calibration before continuing.");
+    Serial.println("[DỪNG] Cần hiệu chuẩn gyro thành công trước khi tiếp tục.");
     return;
   }
   Serial.println();
-  Serial.println("Step 2/2: accel + magnetometer 3D ellipsoid calibration.");
+  Serial.println("Bước 2/2: hiệu chuẩn ellipsoid 3D cho gia tốc kế + từ kế.");
   calibrateVectors(true, true, 40000);
-  Serial.println("========== CALIBRATION FINISHED ==========");
+  Serial.println("========== ĐÃ KẾT THÚC HIỆU CHUẨN ==========");
 }
 
-// ---------- heading engine ----------
+// ---------- bộ tính heading ----------
 
 const char* cardinal(float h) {
   static const char* c[16] = {
-    "N","NNE","NE","ENE","E","ESE","SE","SSE",
-    "S","SSW","SW","WSW","W","WNW","NW","NNW"
+    "B","BĐB","ĐB","ĐĐB","Đ","ĐĐN","ĐN","NĐN",
+    "N","NTN","TN","TTN","T","TTB","TB","BTB"
   };
   int idx = (int)floorf((wrap360(h) + 11.25f) / 22.5f) & 15;
   return c[idx];
@@ -852,7 +853,7 @@ bool computeHeading(float dt, const Raw3 &ar, const Raw3 &gr, const Raw3 &mr) {
 
   if (!upInitialized) return false;
 
-  // Gyro propagates the gravity vector in the body frame:
+  // Gyro lan truyền vector trọng lực trong hệ trục cơ thể:
   // d(up_body)/dt = -omega x up = up x omega.
   if ((cal.flags & CAL_GYRO) && dt > 0.0f && dt < 0.1f) {
     const Vec3 w = mul3(gDps, DEG2RAD_F);
@@ -860,7 +861,7 @@ bool computeHeading(float dt, const Raw3 &ar, const Raw3 &gr, const Raw3 &mr) {
     upEstimate = normalize3(upEstimate);
   }
 
-  // Accelerometer correction. Trust it less during strong linear acceleration.
+  // Hiệu chỉnh bằng gia tốc kế. Giảm độ tin cậy khi có gia tốc tuyến tính mạnh.
   if (aNorm > 0.45f && aNorm < 1.65f) {
     const Vec3 aUnit = mul3(a, 1.0f/aNorm);
     const float trust = clampf(1.0f - fabsf(aNorm - 1.0f)/0.40f, 0.0f, 1.0f);
@@ -869,7 +870,7 @@ bool computeHeading(float dt, const Raw3 &ar, const Raw3 &gr, const Raw3 &mr) {
     upEstimate = normalize3(add3(mul3(upEstimate, 1.0f-beta), mul3(aUnit, beta)));
   }
 
-  // Reject gross magnetic disturbance only after a unit-sphere mag calibration exists.
+  // Chỉ loại nhiễu từ lớn theo độ lớn sau khi đã có hiệu chuẩn từ kế về cầu đơn vị.
   bool magneticOK = (mNorm > 1.0e-6f);
   if (cal.flags & CAL_MAG) {
     magneticOK = magneticOK && (mNorm > 0.50f) && (mNorm < 1.80f);
@@ -887,10 +888,10 @@ bool computeHeading(float dt, const Raw3 &ar, const Raw3 &gr, const Raw3 &mr) {
 
   if (!magFilterInitialized) return false;
 
-  // User-defined forward direction is body -Z.
+  // Hướng tiến theo yêu cầu của dự án là trục -Z của cơ thể.
   const Vec3 forwardBody = {0.0f, 0.0f, -1.0f};
 
-  // Project forward and magnetic field into the plane perpendicular to gravity.
+  // Chiếu hướng tiến và từ trường lên mặt phẳng vuông góc với trọng lực.
   Vec3 fHoriz = sub3(forwardBody, mul3(upEstimate, dot3(forwardBody, upEstimate)));
   const float fNorm = norm3(fHoriz);
   lastForwardHorizontal = fNorm;
@@ -898,7 +899,7 @@ bool computeHeading(float dt, const Raw3 &ar, const Raw3 &gr, const Raw3 &mr) {
   Vec3 northHoriz = sub3(magFiltered, mul3(upEstimate, dot3(magFiltered, upEstimate)));
   const float nNorm = norm3(northHoriz);
 
-  // If forward is almost vertical, azimuth of that axis is physically ill-conditioned.
+  // Nếu hướng tiến gần thẳng đứng, azimuth của trục đó trở nên kém xác định về mặt vật lý.
   if (!magneticOK || fNorm < 0.12f || nNorm < 1.0e-5f) {
     lastHeadingValid = false;
     return false;
@@ -907,7 +908,7 @@ bool computeHeading(float dt, const Raw3 &ar, const Raw3 &gr, const Raw3 &mr) {
   fHoriz = mul3(fHoriz, 1.0f/fNorm);
   northHoriz = mul3(northHoriz, 1.0f/nNorm);
 
-  // ENU convention: east = north x up.
+  // Quy ước ENU: Đông = Bắc x Hướng lên.
   Vec3 east = normalize3(cross3(northHoriz, upEstimate));
   if (norm3(east) < 0.5f) {
     lastHeadingValid = false;
@@ -922,7 +923,7 @@ bool computeHeading(float dt, const Raw3 &ar, const Raw3 &gr, const Raw3 &mr) {
   float trueHeading = wrap360(magneticHeading + cal.declinationDeg);
   lastRawHeadingDeg = trueHeading;
 
-  // Circular low-pass avoids the 359/0 degree discontinuity.
+  // Lọc thấp theo đường tròn tránh gián đoạn tại biên 359/0 độ.
   const float gyroSpeed = norm3(gDps);
   const float alphaH = clampf(0.10f + 0.004f*gyroSpeed, 0.10f, 0.45f);
   const float hr = trueHeading * DEG2RAD_F;
@@ -966,20 +967,20 @@ void updateCompass() {
 
 void printHeadingLine() {
   if (lastHeadingValid && isfinite(lastHeadingDeg)) {
-    Serial.printf("HDG=%6.2f deg %-3s  raw=%6.2f  A=%.3f  M=%.3f  forwardH=%.3f  %s%s%s\n",
+    Serial.printf("HƯỚNG=%6.2f độ %-3s  thô=%6.2f  A=%.3f  M=%.3f  ngangTiến=%.3f  %s%s%s\n",
                   lastHeadingDeg, cardinal(lastHeadingDeg), lastRawHeadingDeg,
                   lastAccelNorm, lastMagNorm, lastForwardHorizontal,
                   (cal.flags & CAL_GYRO)  ? "G" : "-",
                   (cal.flags & CAL_ACCEL) ? "A" : "-",
                   (cal.flags & CAL_MAG)   ? "M" : "-");
   } else {
-    Serial.printf("HDG=HOLD  A=%.3f  M=%.3f  forwardH=%.3f  reason=%s\n",
+    Serial.printf("HƯỚNG=GIỮ  A=%.3f  M=%.3f  ngangTiến=%.3f  lý_do=%s\n",
                   lastAccelNorm, lastMagNorm, lastForwardHorizontal,
-                  (lastForwardHorizontal < 0.12f) ? "forward(-Z) near vertical" : "mag/geometry invalid");
+                  (lastForwardHorizontal < 0.12f) ? "hướng tiến (-Z) gần thẳng đứng" : "từ trường/hình học không hợp lệ");
   }
 }
 
-// ---------- serial console ----------
+// ---------- giao diện Serial Monitor ----------
 
 void printMap(const char *name, const int8_t m[3]) {
   auto axisName = [](int8_t code) -> String {
@@ -988,7 +989,7 @@ void printMap(const char *name, const int8_t m[3]) {
     s += (a == 1 ? "X" : (a == 2 ? "Y" : "Z"));
     return s;
   };
-  Serial.printf("%s: bodyX=%s bodyY=%s bodyZ=%s\n",
+  Serial.printf("%s: cơ_thể_X=%s cơ_thể_Y=%s cơ_thể_Z=%s\n",
                 name,
                 axisName(m[0]).c_str(),
                 axisName(m[1]).c_str(),
@@ -996,7 +997,7 @@ void printMap(const char *name, const int8_t m[3]) {
 }
 
 void printMatrix(const char *name, const float c[3], const float M[9]) {
-  Serial.printf("%s center: [%.6f %.6f %.6f]\n", name, c[0], c[1], c[2]);
+  Serial.printf("%s tâm: [%.6f %.6f %.6f]\n", name, c[0], c[1], c[2]);
   Serial.printf("%s M0: [%.8f %.8f %.8f]\n", name, M[0], M[1], M[2]);
   Serial.printf("%s M1: [%.8f %.8f %.8f]\n", name, M[3], M[4], M[5]);
   Serial.printf("%s M2: [%.8f %.8f %.8f]\n", name, M[6], M[7], M[8]);
@@ -1004,45 +1005,45 @@ void printMatrix(const char *name, const float c[3], const float M[9]) {
 
 void printStatus() {
   Serial.println();
-  Serial.println("=== LABAN4 STATUS ===");
-  Serial.printf("Body frame: +X=head, +Y=left, +Z=inward, FORWARD=-Z\n");
-  Serial.printf("Sensors: %s\n", sensorsReady ? "READY" : "NOT READY");
-  Serial.printf("Calibration flags: gyro=%s accel=%s mag=%s\n",
-                (cal.flags & CAL_GYRO) ? "YES" : "NO",
-                (cal.flags & CAL_ACCEL) ? "YES" : "NO",
-                (cal.flags & CAL_MAG) ? "YES" : "NO");
-  Serial.printf("Declination: %.3f deg (east positive)\n", cal.declinationDeg);
-  Serial.printf("Output: %u Hz, stream=%s\n", cal.outputHz, streamEnabled ? "ON" : "OFF");
-  Serial.printf("Gyro bias raw: [%.3f %.3f %.3f]\n",
+  Serial.println("=== TRẠNG THÁI LABAN4 ===");
+  Serial.printf("Hệ trục: +X=đầu, +Y=trái, +Z=vào cơ thể, HƯỚNG TIẾN=-Z\n");
+  Serial.printf("Cảm biến: %s\n", sensorsReady ? "SẴN SÀNG" : "CHƯA SẴN SÀNG");
+  Serial.printf("Trạng thái hiệu chuẩn: gyro=%s accel=%s mag=%s\n",
+                (cal.flags & CAL_GYRO) ? "CÓ" : "KHÔNG",
+                (cal.flags & CAL_ACCEL) ? "CÓ" : "KHÔNG",
+                (cal.flags & CAL_MAG) ? "CÓ" : "KHÔNG");
+  Serial.printf("Độ từ thiên: %.3f độ (phía Đông là dương)\n", cal.declinationDeg);
+  Serial.printf("Xuất dữ liệu: %u Hz, stream=%s\n", cal.outputHz, streamEnabled ? "ON" : "OFF");
+  Serial.printf("Bias gyro thô: [%.3f %.3f %.3f]\n",
                 cal.gyroBias[0], cal.gyroBias[1], cal.gyroBias[2]);
   printMatrix("ACC", cal.accelCenter, cal.accelMatrix);
   printMatrix("MAG", cal.magCenter, cal.magMatrix);
   printMap("accel map", cal.accelMap);
   printMap("gyro map ", cal.gyroMap);
   printMap("mag map  ", cal.magMap);
-  if (isfinite(lastHeadingDeg)) Serial.printf("Last heading: %.2f deg %s\n", lastHeadingDeg, cardinal(lastHeadingDeg));
+  if (isfinite(lastHeadingDeg)) Serial.printf("Heading gần nhất: %.2f độ %s\n", lastHeadingDeg, cardinal(lastHeadingDeg));
 }
 
 void printRaw() {
   Raw3 a,g,m;
   if (!readAccelRaw(a) || !readGyroRaw(g) || !readMagRaw(m)) {
-    Serial.println("[FAIL] Sensor read.");
+    Serial.println("[LỖI] Không đọc được cảm biến.");
     return;
   }
   const Vec3 ac = calibratedAccelBody(a);
   const Vec3 gc = calibratedGyroBody(g);
   const Vec3 mc = calibratedMagBody(m);
 
-  Serial.printf("RAW accel: %d %d %d\n", a.x,a.y,a.z);
-  Serial.printf("RAW gyro : %d %d %d\n", g.x,g.y,g.z);
-  Serial.printf("RAW mag  : %d %d %d\n", m.x,m.y,m.z);
-  Serial.printf("BODY accel: %.4f %.4f %.4f |norm|=%.4f\n", ac.x,ac.y,ac.z,norm3(ac));
-  Serial.printf("BODY gyro : %.3f %.3f %.3f deg/s\n", gc.x,gc.y,gc.z);
-  Serial.printf("BODY mag  : %.5f %.5f %.5f |norm|=%.5f\n", mc.x,mc.y,mc.z,norm3(mc));
+  Serial.printf("THÔ accel: %d %d %d\n", a.x,a.y,a.z);
+  Serial.printf("THÔ gyro : %d %d %d\n", g.x,g.y,g.z);
+  Serial.printf("THÔ mag  : %d %d %d\n", m.x,m.y,m.z);
+  Serial.printf("CƠ_THỂ accel: %.4f %.4f %.4f |norm|=%.4f\n", ac.x,ac.y,ac.z,norm3(ac));
+  Serial.printf("CƠ_THỂ gyro : %.3f %.3f %.3f độ/s\n", gc.x,gc.y,gc.z);
+  Serial.printf("CƠ_THỂ mag  : %.5f %.5f %.5f |norm|=%.5f\n", mc.x,mc.y,mc.z,norm3(mc));
 }
 
 void scanI2C() {
-  Serial.println("I2C scan:");
+  Serial.println("Quét I2C:");
   int found = 0;
   for (uint8_t a = 1; a < 127; ++a) {
     if (i2cPing(a)) {
@@ -1054,31 +1055,31 @@ void scanI2C() {
       ++found;
     }
   }
-  if (!found) Serial.println("  none");
+  if (!found) Serial.println("  không tìm thấy thiết bị");
 }
 
 void printHelp() {
   Serial.println();
-  Serial.println("=== LABAN4 SERIAL COMMANDS ===");
-  Serial.println("help                  : show this menu");
-  Serial.println("status                : calibration, maps, matrices, heading");
-  Serial.println("scan                  : I2C scan");
-  Serial.println("raw                   : one raw + calibrated sensor sample");
-  Serial.println("heading               : print current heading once");
-  Serial.println("stream on|off         : continuous heading output");
-  Serial.println("rate <1..50>          : output lines per second");
-  Serial.println("decl <degrees>        : magnetic declination, east positive");
-  Serial.println("cal gyro              : 5 s stationary gyro bias");
-  Serial.println("cal accel             : 30 s slow all-orientation accel ellipsoid fit");
-  Serial.println("cal mag               : 40 s 3D magnetometer hard/soft-iron fit");
-  Serial.println("cal all               : gyro + accel + mag, fully on-device");
-  Serial.println("map show              : show sensor->body signed axis maps");
-  Serial.println("map accel <X> <Y> <Z> : e.g. map accel +x -y +z");
-  Serial.println("map gyro  <X> <Y> <Z> : each token is +/-x/y/z; axes unique");
-  Serial.println("map mag   <X> <Y> <Z> : mapping outputs BODY X,Y,Z respectively");
-  Serial.println("factory reset         : erase calibration/settings and restore defaults");
+  Serial.println("=== CÁC LỆNH SERIAL CỦA LABAN4 ===");
+  Serial.println("help                  : hiện danh sách lệnh");
+  Serial.println("status                : xem hiệu chuẩn, mapping, ma trận và heading");
+  Serial.println("scan                  : quét thiết bị I2C");
+  Serial.println("raw                   : in một mẫu thô và mẫu đã hiệu chỉnh");
+  Serial.println("heading               : in heading hiện tại một lần");
+  Serial.println("stream on|off         : bật/tắt xuất heading liên tục");
+  Serial.println("rate <1..50>          : số dòng dữ liệu xuất mỗi giây");
+  Serial.println("decl <degrees>        : độ từ thiên, phía Đông là số dương");
+  Serial.println("cal gyro              : hiệu chuẩn bias gyro, đứng yên 5 giây");
+  Serial.println("cal accel             : fit ellipsoid gia tốc kế 30 giây, xoay chậm đủ hướng");
+  Serial.println("cal mag               : fit hard/soft-iron từ kế 3D trong 40 giây");
+  Serial.println("cal all               : hiệu chuẩn gyro + accel + mag hoàn toàn trên module");
+  Serial.println("map show              : xem ánh xạ có dấu từ cảm biến sang cơ thể");
+  Serial.println("map accel <X> <Y> <Z> : ví dụ map accel +x -y +z");
+  Serial.println("map gyro  <X> <Y> <Z> : mỗi mục là +/-x/y/z; không được lặp trục");
+  Serial.println("map mag   <X> <Y> <Z> : ánh xạ lần lượt ra X,Y,Z của cơ thể");
+  Serial.println("factory reset         : xóa hiệu chuẩn/cài đặt và khôi phục mặc định");
   Serial.println();
-  Serial.println("Required body frame: +X=head, +Y=left, +Z=inward, forward=-Z.");
+  Serial.println("Hệ trục yêu cầu: +X=hướng đầu, +Y=trái, +Z=vào cơ thể, hướng tiến=-Z.");
 }
 
 int8_t parseAxisToken(String s) {
@@ -1120,7 +1121,7 @@ void handleMapCommand(const String &line) {
   char *a1 = strtok(nullptr, " ");
   char *a2 = strtok(nullptr, " ");
   if (!t0 || !sensor || !a0 || !a1 || !a2) {
-    Serial.println("Usage: map accel|gyro|mag +x +y +z");
+    Serial.println("Cách dùng: map accel|gyro|mag +x +y +z");
     return;
   }
 
@@ -1130,7 +1131,7 @@ void handleMapCommand(const String &line) {
     parseAxisToken(String(a2))
   };
   if (!validMap3(m)) {
-    Serial.println("[FAIL] Map must use each of X/Y/Z exactly once, with optional +/- sign.");
+    Serial.println("[LỖI] Mapping phải dùng mỗi trục X/Y/Z đúng một lần, có thể thêm dấu +/-.");
     return;
   }
 
@@ -1138,7 +1139,7 @@ void handleMapCommand(const String &line) {
   else if (strcmp(sensor, "gyro") == 0) memcpy(cal.gyroMap, m, 3);
   else if (strcmp(sensor, "mag") == 0) memcpy(cal.magMap, m, 3);
   else {
-    Serial.println("[FAIL] Sensor must be accel, gyro or mag.");
+    Serial.println("[LỖI] Cảm biến phải là accel, gyro hoặc mag.");
     return;
   }
 
@@ -1146,7 +1147,7 @@ void handleMapCommand(const String &line) {
   upInitialized = false;
   magFilterInitialized = false;
   headingFilterInitialized = false;
-  Serial.println("[OK] Axis map saved.");
+  Serial.println("[OK] Đã lưu ánh xạ trục.");
   printMap(sensor, m);
 }
 
@@ -1156,7 +1157,7 @@ void factoryReset() {
   upInitialized = false;
   magFilterInitialized = false;
   headingFilterInitialized = false;
-  Serial.println("[OK] Factory defaults restored.");
+  Serial.println("[OK] Đã khôi phục cài đặt mặc định.");
 }
 
 void handleCommand(String line) {
@@ -1169,25 +1170,25 @@ void handleCommand(String line) {
   else if (line == "scan") scanI2C();
   else if (line == "raw") printRaw();
   else if (line == "heading") printHeadingLine();
-  else if (line == "stream on") { streamEnabled = true; Serial.println("[OK] stream ON"); }
-  else if (line == "stream off") { streamEnabled = false; Serial.println("[OK] stream OFF"); }
+  else if (line == "stream on") { streamEnabled = true; Serial.println("[OK] Đã bật stream"); }
+  else if (line == "stream off") { streamEnabled = false; Serial.println("[OK] Đã tắt stream"); }
   else if (line.startsWith("rate ")) {
     int hz = line.substring(5).toInt();
-    if (hz < 1 || hz > 50) Serial.println("[FAIL] rate must be 1..50");
+    if (hz < 1 || hz > 50) Serial.println("[LỖI] rate phải nằm trong khoảng 1..50");
     else {
       cal.outputHz = (uint16_t)hz;
       saveCalibration();
-      Serial.printf("[OK] rate=%d Hz\n", hz);
+      Serial.printf("[OK] tốc độ xuất=%d Hz\n", hz);
     }
   }
   else if (line.startsWith("decl ")) {
     float d = line.substring(5).toFloat();
-    if (!isfinite(d) || d < -180.0f || d > 180.0f) Serial.println("[FAIL] decl range is -180..+180 deg");
+    if (!isfinite(d) || d < -180.0f || d > 180.0f) Serial.println("[LỖI] decl phải nằm trong khoảng -180..+180 độ");
     else {
       cal.declinationDeg = d;
       saveCalibration();
       headingFilterInitialized = false;
-      Serial.printf("[OK] declination=%.3f deg (east positive)\n", d);
+      Serial.printf("[OK] độ từ thiên=%.3f độ (phía Đông là dương)\n", d);
     }
   }
   else if (line == "cal gyro") calibrateGyro();
@@ -1196,10 +1197,10 @@ void handleCommand(String line) {
   else if (line == "cal all") calibrateAll();
   else if (line.startsWith("map ")) handleMapCommand(line);
   else if (line == "factory reset") factoryReset();
-  else Serial.println("Unknown command. Type: help");
+  else Serial.println("Lệnh không hợp lệ. Gõ: help");
 }
 
-// ---------- Arduino entry points ----------
+// ---------- điểm vào Arduino ----------
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
@@ -1207,12 +1208,12 @@ void setup() {
 
   Serial.println();
   Serial.println("==============================================");
-  Serial.println(" LABAN4 - GY-85 WEARABLE TILT COMPASS");
-  Serial.println(" +X=head  +Y=left  +Z=inward  FORWARD=-Z");
+  Serial.println(" LABAN4 - LA BÀN ĐEO NGƯỜI GY-85 CÓ BÙ NGHIÊNG");
+  Serial.println(" +X=đầu  +Y=trái  +Z=vào cơ thể  HƯỚNG TIẾN=-Z");
   Serial.println("==============================================");
 
   const bool hadCal = loadCalibration();
-  Serial.printf("NVS calibration: %s\n", hadCal ? "loaded" : "defaults");
+  Serial.printf("Dữ liệu hiệu chuẩn NVS: %s\n", hadCal ? "đã tải" : "mặc định");
 
   Wire.begin(LABAN4_SDA, LABAN4_SCL);
   Wire.setClock(400000);
@@ -1221,12 +1222,12 @@ void setup() {
   printHelp();
 
   if (!(cal.flags & CAL_MAG)) {
-    Serial.println("[NOTE] Magnetometer is not calibrated. Run: cal all");
+    Serial.println("[LƯU Ý] Từ kế chưa được hiệu chuẩn. Hãy chạy: cal all");
   }
 }
 
 void loop() {
-  // Keep sensor engine near 50 Hz.
+  // Duy trì vòng cập nhật cảm biến gần 50 Hz.
   static uint32_t lastSensorMs = 0;
   const uint32_t nowMs = millis();
   if ((uint32_t)(nowMs - lastSensorMs) >= 20) {
